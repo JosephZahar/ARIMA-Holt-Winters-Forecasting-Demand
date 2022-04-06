@@ -1,0 +1,783 @@
+---
+title: "ARIMA, Holt-Winters models to forcast demand"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+## Initialisation
+
+Let's start by importing the desired packages for this coursework and remove any warning or message that may be displayed while importing them. Before starting the forecasting, we will also set the working directory of this notebook and import the historical demand of lettuce for each restaurant, previously manipulated using Python programming language in Jupyter Notebook.\newline
+
+```{r message=FALSE, warning=FALSE}
+# import desired libraries
+suppressPackageStartupMessages({
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+})
+```
+
+```{r message=FALSE, warning=FALSE}
+# load processed data for restaurant 4904
+restaurant_4904 <- read.csv('restaurant_4904.csv') 
+# load processed data for restaurant 12631
+restaurant_12631 <- read.csv('restaurant_12631.csv') 
+# load processed data for restaurant 20974
+restaurant_20974 <- read.csv('restaurant_20974.csv') 
+# load processed data for restaurant 46673
+restaurant_46673 <- read.csv('restaurant_46673.csv') 
+```
+
+## Final preprocessing
+
+One last step will need to be taken in order to guarantee the high accuracy of our forecast, and that is to make sure that all day included from the beginning to the end of the data collection have a data entry for the lettuce demand. Meaning that days not having any orders containing lettuce should still have an entry of 0 in our dataset instead of not having any entry at all. Not including the dates with 0 demand in klettuce would skew our forecast and create some unexplained behavior. The next step below will then add a value of 0 lettuce ordered for the date not included in the final data generated above.\newline
+
+```{r results = 'hide'}
+# create a sequence of dates from starting to end of data collection
+seq_4904 <- seq(from = as.Date(restaurant_4904[1,1], format="%y-%m-%d"), 
+            to = as.Date(tail(restaurant_4904, n =1)[1,1], format="%y-%m-%d"), 
+            by = "day") # seq of dates for store 4904
+
+seq_12631 <- seq(from = as.Date(restaurant_12631[1,1], format="%y-%m-%d"), 
+            to = as.Date(tail(restaurant_12631, n =1)[1,1], format="%y-%m-%d"), 
+            by = "day") # seq of dates for store 12631
+
+seq_20974 <- seq(from = as.Date('2015-03-20'), 
+            to = as.Date('2015-06-15'), 
+            by = "day") # seq of dates for store 20974
+
+seq_46673 <- seq(from = as.Date(restaurant_46673[1,1], format="%y-%m-%d"),
+            to = as.Date(tail(restaurant_46673, n =1)[1,1], format="%y-%m-%d"), 
+            by = "day") # seq of dates for store 46673
+
+# compare both the sequence and original dataset
+# complete the missing values and fill them with 0
+restaurant_4904 <- restaurant_4904 %>%
+  mutate(date = as.Date(date, format="%y-%m-%d")) %>%
+  tidyr::complete(date = seq_4904, fill = list(Ounce = 0))
+
+restaurant_12631 <- restaurant_12631 %>%
+  mutate(date = as.Date(date, format="%y-%m-%d")) %>%
+  tidyr::complete(date = seq_12631, fill = list(Ounce = 0))
+
+restaurant_20974 <- restaurant_20974 %>%
+  mutate(date = as.Date(date, format="%y-%m-%d")) %>%
+  tidyr::complete(date = seq_20974, fill = list(Ounce = 0))
+restaurant_20974 <- head(restaurant_20974, - 5)
+
+restaurant_46673 <- restaurant_46673 %>%
+  mutate(date = as.Date(date, format="%y-%m-%d")) %>%
+  tidyr::complete(date = seq_46673, fill = list(Ounce = 0))
+```
+## Time series analysis
+Now that the data is ready we can shift to the first part of this report, being the proper application of the Holt-Winters model to predict future daily lettuce demand for each restaurant. In order to start our forecasting we still have to convert the four data sets to time series and plot them to have a first potential idea of the trend behind the data. the frequency will be set to 7, assuming a weekly cycle for the demand of lettuce. \newline
+
+```{r fig0, fig.width = 10, fig.height = 5}
+# convert the data set into time series with a frequency of 7, assuming weekly
+# cycle and trend while defining the starting date
+ts_4904 = ts(restaurant_4904[,2], frequency = 7, start = c(03,13))
+ts_12631 = ts(restaurant_12631[,2], frequency = 7, start = c(03,05))
+ts_20974 = ts(restaurant_20974[,2], frequency = 7, start = c(03,20))
+ts_46673 = ts(restaurant_46673[,2], frequency = 7, start = c(03,05))
+
+# plot the time series of each store for a first visualization
+# arrange the plots in a 2 by 2 grid
+par(mfrow = c(2,2))
+plot.ts(ts_4904, main="store 4904", xlab="Time", ylab="Ounces", 
+          col = "darkgreen", frame.plot = TRUE)
+plot.ts(ts_12631, main="store 12631", xlab="Time", ylab="Ounces", 
+          col = "darkgreen", frame.plot = TRUE)
+plot.ts(ts_20974, main="store 20974", xlab="Time", ylab="Ounces", 
+          col = "darkgreen", frame.plot = TRUE)
+plot.ts(ts_46673, main="store 46673", xlab="Time", ylab="Ounces", 
+          col = "darkgreen", frame.plot = TRUE)
+```
+\
+A first assumption we observe from the figure above is that stores 46673 and 4904 do not experience any increase or decrease of lettuce demand through time, having a more stationary and constant trend whereas the other restaurants show a more relevant trend in their lettuce demand but no significant seasonal component. In fact, one way to verify these assumptions is to plot the time series decomposition by their three main components: trend, seasonality and random remainder.
+
+```{r fig1, fig.height = 3.7, fig.width = 6, fig.align = "center"}
+# plot seasonal decomposition of ts_4904
+plot(stl(ts_4904[,1], s.window = "period",), main="Seasonal Decomposition for store 4904")
+```
+\
+For store 4904 above, the trend component is relatively insignificant and constant with a small decrease of the demand at some point in the data. The seasonal trend is also insignificant since we can observe the same seasonality along the data but experience more variation than the trend component. The remainder components however is pretty significant, being what is left over when the seasonal and trend-cycle components have been subtracted from the data. In fact, The small grey bar in the bottom panel shows that the variation in the remainder component is large compared to the variation in the seasonal and trend components with bars more than double its size. 
+
+```{r fig2, fig.height = 3.65, fig.width = 6, fig.align = "center"}
+# plot seasonal decomposition of ts_12631
+plot(stl(ts_12631[,1], s.window = "period"), main="Seasonal Decomposition for store 12631")
+```
+For store 12631 above, the trend component is relatively significant and shows an overall increase of the lettuce demand. It has a smaller grey bar than the seasonality meaning that its variation is larger and more significant. The seasonal trend is insignificant with no variation across the data. The remainder components is significant here with a small grey bar similar to the trend component. However, by analyzing the time series plot, we notice that the magnitude of the seasonal component actually vary in time. In fact, despite not having detected any significant seasonality in the decomposition of the time series, we clearly see a change in the magnitude component inducing a multiplicative model contrarily to the other that are additive.
+
+```{r fig3, fig.height = 3.7, fig.width = 6, fig.align = "center"}
+# plot seasonal decomposition of ts_20974
+plot(stl(ts_20974[,1], s.window = "period"), main="Seasonal Decomposition for store 20974")
+```
+For store 20974, the trend component is not significant as we can see no linear increase or decrease in the lettuce demand especially in the beginning of the collection dates, we also notice a large grey bar for the trend component explaining a small variation of the cycle compared to the seasonality that has a larger variation along the different dates. The remainder components is significant here with a small grey bar explaining large variation. 
+```{r fig4, fig.height = 3.7, fig.width = 6, fig.align = "center"}
+# plot seasonal decomposition of ts_46673
+plot(stl(ts_46673[,1], s.window = "period"), main="Seasonal Decomposition for store 46673")
+```
+For the last store, the trend component does not see any significant trend (increase or decrease in the demand) with a very large grey bar explaining almost no variation. The seasonal component here, despite being also insignificant, does show a higher variation compared to the three other restaurants as well as a higher variation compared to the cycle component. Finally, The remainder components is significant here with a small grey bar explaining large variation. 
+
+## 1. Proper application of the Holt-Winters model
+Having analysed the time series decomposition of the four data sets, we can now proceed to optimizing the parameters of the Holt-Winters model to find the optimal forecasting model. We will now start by splitting the samples into train and test sets to evaluate the accuracy and out of sample performance of the trained model. The split is based on an 80/20 ratio for the train and test set respectively. An important point to note is that any missing data was removed and omitted from the time-series especially at the very beginning of the time-series since it will bias and skew the actual correct estimation of the data as well as the inability to hone the forecast power furthermore. For example, there was missing data present from 2015-03-05 to 2015-03-13 for store 4904 that should be omitted as they will create a significant linear trend in the data that is wrong is not representative of the real general trend behind the data. The same was done for store 20974 for which data was omitted until 2015-03-20 so we only include relevant data when training the model to not confuse the forecaste and create insignificant trends
+
+```{r}
+# split ts_4904 to train and test set with an 80/20 split
+split_4904 <- TSstudio::ts_split(ts.obj = ts_4904, 
+              sample.out = length(ts_4904)*0.2)
+ts_4904_train <- split_4904$train # assign train set
+ts_4904_test <- split_4904$test # assign test set
+
+# split ts_12631 to train and test set with an 80/20 split
+split_12631 <- TSstudio::ts_split(ts.obj = ts_12631, 
+               sample.out = round(length(ts_12631)*0.2)-1)
+ts_12631_train <- split_12631$train # assign train set
+ts_12631_test <- split_12631$test # assign test set
+
+# split ts_20974 to train and test set with an 80/20 split
+split_20974 <- TSstudio::ts_split(ts.obj = ts_20974, 
+               sample.out = round(length(ts_20974)*0.2))
+ts_20974_train <- split_20974$train # assign train set
+ts_20974_test <- split_20974$test # assign test set
+
+# split ts_46673 to train and test set with an 80/20 split
+split_46673 <- TSstudio::ts_split(ts.obj = ts_46673, 
+               sample.out = round(length(ts_46673)*0.2)-1)
+ts_46673_train <- split_46673$train # assign train set
+ts_46673_test <- split_46673$test # assign test set
+```
+
+### Store 4904
+We will now use the ETS() function to create our forecast for each individual store. Starting with store 4904, after careful observation of the time series decomposition, we concluded that there was no significant linear trend in the data setting the second Z of the ets() function as N, but a seasonal component setting the third Z as A. Thus, two model need to be tested here, both ETS(A,N,A) and ETS(Z,Z,Z). \newline
+
+```{r fig5, fig.width = 10, fig.height = 3.5}
+# initialize both models proposed above
+model_4904_ets1 = ets(ts_4904_train, model = 'ANA') # ANA model
+model_4904_ets2 = ets(ts_4904_train, model = 'ZZZ') # ZZZ model
+
+# forecast the test set to compare the accuracy later on 
+forecast_4904_ets1 = forecast(model_4904_ets1, h=length(ts_4904)*0.2)
+forecast_4904_ets2 = forecast(model_4904_ets2, h=length(ts_4904)*0.2)
+
+# plot the fitted and predicted data 
+# arrange the plots into a 2 x 2 grid
+par(mfrow = c(1,2))
+plot(forecast_4904_ets1)
+lines(fitted(forecast_4904_ets1), col= 'blue')
+lines(forecast_4904_ets1$mean, col='red')
+plot(forecast_4904_ets2)
+lines(fitted(forecast_4904_ets2), col= 'blue')
+lines(forecast_4904_ets2$mean, col='red')
+```
+
+By comparing both models, it is clear that the ETS(A,N,A) seems to be the most representative of the overall trend and pattern behind the data as initially assumed. The ETS(A,N,A) is appeared both to fit the data and predict future demand better than the ETS(A,A,A) model. This because the ETS(A,A,A) model assume a trend in the data due to the small insignificant decrease present between the 13 and 15th week and including it as a significant observation. However, as seen in the time series decomposition only the trend and seasonal components should be considered in our model contrarily to what was found by the ZZZ model. In fact, the AAA model predict a decline in the future demand, a decline not seen in the training other than between week 13 and 15. Hence, for this store, ETS(A,N,A) is considered the most adequate and the best to fit the data for now.
+
+The smoothing parameters of the ETS(A,N,A) model were alpha = 0.1935 and gamma = 1e-04 with l = 335.4537 and s = 10.9948 54.9311 56.7306 38.9975 20.9684 -86.7199 -95.9024 as initial states.
+
+We can now evaluate the out of sample performance of our optimal model where the error and seasonal component are additive and there is no trend-cycle component. We will hence compare the predicted demand with the actual lettuce demand present in the test set as follows:
+```{r}
+# compare the accuracy between predicted and actual demand
+accuracy(forecast_4904_ets1,ts_4904_test)
+```
+
+We can now generate our final model for restaurant 4904 based on the results obtained above by including all the data provided.
+```{r fig7, fig.width = 8, fig.height = 3}
+# predict the next two weeks lettuce demand for store 4904 and plot outcome
+model_4904_ets_final = ets(ts_4904, model = 'ANA')
+forecast_4904_ets_final = forecast(model_4904_ets_final,h=14)
+autoplot(forecast_4904_ets_final)
+```
+We will now try to take it a step further by examining our model for further fine tuning and potential enhancement. We will hence look out for any correlation between the forecast errors in the time series using the autocorrelation plots of the ETS residuals.
+
+```{r fig102, fig.height = 6}
+# plot the residual plot and the ACF plot of the errors
+par(mfrow = c(2,2)) # arrange grid
+acf(forecast_4904_ets_final$residuals, lag.max=20, main = '')
+plot.ts(forecast_4904_ets_final$residuals, main="In-sample Forecast Errors", 
+        xlab="Time", ylab="Residuals", col = "darkgreen")
+```
+```{r}
+# Box-Ljung test 
+Box.test(forecast_4904_ets_final$residuals, lag=20, type="Ljung-Box")
+```
+
+\
+From the ACF plot above we can conclude that there is no direct correlation from lags 1 to 20 with only one lag surpassing the 95% significance bounds. The reason behind this is expected and does not prove any correlation between the residuals. Another interesting measure to analyse is the Box-L jung test with a p-value of 0.1497, X-squared = 26.50 and df = 20. These results infer that the forecast errors are independently distributed. Hence, we can conclude that our ETS(A,N,A) model cannot be more improved and that it should provide an accurate forecast.
+
+### Store 12631
+Concerning store 12631, after careful observation of the time series decomposition, we concluded that there was a significant linear trend and variation in the data setting the second Z of the ets() function as additive, while the seasonal component is set as multiplicative (the third Z is M). Thus, two model need to be tested here, both ETS(M,A,M) and ETS(Z,Z,Z). 
+
+```{r fig6, fig.width = 10, fig.height = 3.5}
+# initialize both models proposed above
+model_12631_ets1 = ets(ts_12631_train, model = 'MAM') # model MAM
+model_12631_ets2 = ets(ts_12631_train, model = 'ZZZ') # model ZZZ
+
+# forecast the test set for later comparison
+forecast_12631_ets1 = forecast(model_12631_ets1, h=round(length(ts_12631)*0.2)-1)
+forecast_12631_ets2 = forecast(model_12631_ets2, h=round(length(ts_12631)*0.2)-1)
+
+# arrange grid and plot fitted and predicted demand
+par(mfrow = c(1,2))
+plot(forecast_12631_ets1)
+lines(fitted(forecast_12631_ets1), col= 'blue')
+lines(forecast_12631_ets1$mean, col='red')
+plot(forecast_12631_ets2)
+lines(fitted(forecast_12631_ets2), col= 'blue')
+lines(forecast_12631_ets2$mean, col='red')
+```
+From both graphs above, the two models are almost identical and seems to fit the data similarly, while the ETS(M,A,M) model display a small increase in the demand. The ETS(M,N,M) was more advantaged here since the systematic component of the demand appears to have a multiplicative seasonal factor with no trend at the systematic component instead of being additive as seen in the previous decomposition. In fact, The smoothing parameters of the ETS(M,A,M) model were alpha = 0.0936, beta = 0.0061 and gamma = 1e-04 with l = 215.4962 and s = 1.0343 0.9599 0.9392 1.002 0.8522 1.1194 1.093 as initial states while The smoothing parameters of the ETS(M,N,M) model were alpha = 0.1348 and gamma = 1e-04 with l = 240.194 and s = 1.0421 0.9597 0.9365 1.0039 0.8493 1.1229 1.0855 as initial states with AICc 979.3419 and 976.5701, slightly advantaging the ETS(M,N,M) model. However, from the decomposition achieved, there was clearly a significant trend in the time series that may have been omitted by the ZZZ model prioritizing the multiplicative seasonal component and the change in magnitude instead. Note also that a different test set size may give different results and converge to the MAM model.
+
+We will then carry on with the ETS(M,A,M) being the most adequate for this time series. And we can now evaluate the out of sample performance of our optimal model where the error and seasonal component are multiplicative and there is no trend-cycle component. The difference between the predicted demand and the actual lettuce demand present in the test set are as follows:
+```{r}
+# compare the daily demand between the predicted and actual demand
+accuracy(forecast_12631_ets1,ts_12631_test)
+```
+
+We can now generate our final model for restaurant 4904 based on the results obtained above by including all the data provided.
+```{r fig9, fig.width = 8, fig.height = 3}
+# generate final model and plot forecast for the next two weeks
+model_12631_ets_final = ets(ts_12631, model = 'MAM')
+forecast_12631_ets_final = forecast(model_12631_ets_final,h=14)
+autoplot(forecast_12631_ets_final)
+```
+Let's take it a step further by examining our model for potential improvement. We will look at the autocorrelation plot of the forecasts errors in the time series to detect any correlation between them, as well as relying on the L-Jung Box test to determine the significance of our results.
+
+```{r fig101, fig.height = 6}
+# check residual plots and ACF of in sample forecast errors
+par(mfrow = c(2,2))
+acf(forecast_12631_ets_final$residuals, lag.max=20, main = '')
+plot.ts(forecast_12631_ets_final$residuals, main="In-sample Forecast Errors", 
+        xlab="Time", ylab="Residuals", col = "darkgreen")
+```
+```{r}
+# Box-Ljung test
+Box.test(forecast_12631_ets_final$residuals, lag=20, type="Ljung-Box")
+```
+
+\
+From the ACF and residuals plot above we can conclude that there is no direct correlation from lags 1 to 20. Similar results to the first model are observed here, with only one lag exceeding the 95% bound. The Box-L jung test has a p-value of 0.5596, X-squared = 18.422 and df = 20. These results infer that the forecast errors are independently distributed and that there is no evidence of any correlation between the forecast errors. Hence, we can conclude that our ETS(M,N,M) model cannot be improved and that it should provide an accurate forecast.
+
+### Store 20974
+Concerning store 20974, after carefully analysing the time series decomposition, we concluded that there was no significant linear trend and variation in the data setting the second Z of the ets() function as N, but a more significant seasonal component setting the third Z as A. Thus, two model need to be tested here, both ETS(A,N,A) and ETS(Z,Z,Z). 
+
+```{r fig10, fig.width = 10, fig.height = 3.5}
+# initialize the two model proposed above
+model_20974_ets1 = ets(ts_20974_train, model = 'ANA') # model ANA
+model_20974_ets2 = ets(ts_20974_train, model = 'ZZZ') # model ZZZ
+
+# forecast the demand of the test size for later comparison
+forecast_20974_ets1 = forecast(model_20974_ets1, h=round(length(ts_20974)*0.2)-1)
+forecast_20974_ets2 = forecast(model_20974_ets2, h=round(length(ts_20974)*0.2)-1)
+
+# plot and arrange the fitted and predicted demand for each model
+par(mfrow = c(1,2))
+plot(forecast_20974_ets1)
+lines(fitted(forecast_20974_ets1), col= 'blue')
+lines(forecast_20974_ets1$mean, col='red')
+plot(forecast_20974_ets2)
+lines(fitted(forecast_20974_ets2), col= 'blue')
+lines(forecast_20974_ets2$mean, col='red')
+```
+From both graphs above, the two models are identical and seems to fit the data in the exact same way. In fact, our initial observation was correct, the ETS(A,N,A) is the best model here, and is the best at explaining the trend in the data. The smoothing parameters of the ETS(A,N,A) model were alpha = 0.5388 and gamma = 1e-04 with l = 237.9825 and s = 110.3551 -8.2943 -18.6435 0.1053 -37.2637 31.8509 21.8901 as initial states while The smoothing parameters of the ETS(M,N,M) model were alpha = 0.1348 and gamma = 1e-04 with l = 99.4311 and s = 3.3268 22.7749 11.3695 18.1681 10.1577 -58.3113 -7.4857 as initial states.
+
+We will then carry on with the ETS(M,N,M) being the most adequate for this time series. And we can now evaluate the out of sample performance of our optimal model where the error and seasonal component are multiplicative and there is no trend-cycle component. The difference between the predicted demand and the actual lettuce demand present in the test set are as follows:
+```{r}
+# check the accuracy of the predicting ETS model
+accuracy(forecast_20974_ets2,ts_20974_test)
+```
+
+We can now generate our final model for restaurant 4904 based on the results obtained above by including all the data provided.
+```{r fig11, fig.width = 8, fig.height = 3}
+# generate final forecast model and predict lettuce demand for the next two weeks
+model_20974_ets_final = ets(ts_20974, model = 'ANA')
+forecast_20974_ets_final = forecast(model_20974_ets_final,h=14)
+autoplot(forecast_20974_ets_final)
+```
+Similarly to what we have done to the other stores, we will test our model for potential improvement. We will plot the autocorrelation plot of the forecasts errors in the time series to find any correlation, and consequently check the significance of our results using the statistics provided by the L-Jung Box test.
+
+```{r fig201, fig.height = 6}
+# plot and arrange the residuals plots as well as the ACF of errors
+par(mfrow = c(2,2))
+acf(forecast_20974_ets_final$residuals, lag.max=20, main = '')
+plot.ts(forecast_20974_ets_final$residuals, main="In-sample Forecast Errors", 
+        xlab="Time", ylab="Residuals", col = "darkgreen")
+```
+```{r}
+# Box-Ljung test
+Box.test(forecast_20974_ets_final$residuals, lag=20, type="Ljung-Box")
+```
+
+\
+From the ACF and residuals plot above we can conclude that there is no direct correlation from lags 1 to 20 with only one lag exceeding the 95% bound. The Box-L jung test has a p-value of 0.926, X-squared = 12.1 and df = 20 meaning that we should accept the null hypothesis that the forecast errors are independently distributed and that there is no evidence of any correlation between the forecast errors. Hence, we can conclude that our ETS(A,N,A) model cannot be improved and that it should provide an accurate forecast.
+
+### Store 46673
+Finally, the last store in question is store 46673. This store has a very significant seasonal component compared to the other restaurants but there was no significant linear trend and variation in the data, setting the second Z of the ets() function as N whereas the third Z as will be set as A. Thus, two model need to be tested here, both ETS(A,N,A) and ETS(Z,Z,Z). 
+
+```{r fig12, fig.width = 10, fig.height = 3.5}
+# initialize the above suggested models
+model_46673_ets1 = ets(ts_46673_train, model = 'ANA') # model ANA
+model_46673_ets2 = ets(ts_46673_train, model = 'ZZZ') # model ZZZ
+
+# predict the lettuce demand of the test set for later analysis
+forecast_46673_ets1 = forecast(model_46673_ets1, h=round(length(ts_46673)*0.2)-1)
+forecast_46673_ets2 = forecast(model_46673_ets2, h=round(length(ts_46673)*0.2)-1)
+
+# plot and arrange each model forecast for the demand of the test set 
+par(mfrow = c(1,2))
+plot(forecast_46673_ets1)
+lines(fitted(forecast_46673_ets1), col= 'blue')
+lines(forecast_46673_ets1$mean, col='red')
+plot(forecast_46673_ets2)
+lines(fitted(forecast_46673_ets2), col= 'blue')
+lines(forecast_46673_ets2$mean, col='red')
+```
+From both graphs above, the two models are identical and seems to fit the data in the exact same way. In fact, our initial observation was correct, the ETS(A,N,A) is the best model here, and is the best at explaining the trend in the data. The smoothing parameters of the ETS(A,N,A) model were alpha = 0.1135 and gamma = 1e-04 with l = 145.0957 and s = 29.3732 19.2564 26.2776 23.638 -68.2592 -47.3313 17.0454 as initial states.
+
+We will then carry on with the ETS(A,N,A) being the most adequate for this time series. And we can now evaluate the out of sample performance of our optimal model where the error and seasonal component are additive and there is no trend-cycle component. The difference between the predicted demand and the actual lettuce demand present in the test set are as follows:
+```{r}
+# check the accuracy of the chosen model with the true test set 
+accuracy(forecast_46673_ets2,ts_46673_test)
+```
+
+We can now generate our final model for restaurant 4904 based on the results obtained above by including all the data provided.
+```{r fig13, fig.width = 8, fig.height = 3}
+# generate final model and predict the daily demand of lettuce for the next 2 weeks
+model_46673_ets_final = ets(ts_46673, model = 'ANA')
+forecast_46673_ets_final = forecast(model_46673_ets_final,h=14)
+autoplot(forecast_46673_ets_final)
+```
+We will now conduct the previous tests one last time to detect any potential improvement of our model. We will plot the autocorrelation plot of the forecasts errors in the time series to find any correlation, and consequently check the significance of our results using the statistics provided by the L-Jung Box test.
+
+```{r fig200, fig.height = 6}
+# check in sample forecast errors and ACF plot
+par(mfrow = c(2,2))
+acf(forecast_46673_ets_final$residuals, lag.max=20, main = '')
+plot.ts(forecast_46673_ets_final$residuals, main="In-sample Forecast Errors", 
+        xlab="Time", ylab="Residuals", col = "darkgreen")
+```
+```{r}
+# Box-Ljung test
+Box.test(forecast_46673_ets_final$residuals, lag=20, type="Ljung-Box")
+```
+
+\
+Finally from the plots above we can deduce that there is no direct correlation from lags 1 to 20 with only one lag significantly exceeding the 95% bound. The Box-L jung test has a p-value of 0.188, X-squared = 25.36 and df = 20 meaning that we should accept the null hypothesis that the forecast errors are independently distributed and that there is no evidence of any correlation between the forecast errors. Hence, we can conclude that our ETS(A,N,A) model cannot be improved.
+
+
+Now that we have covered the Holt-Winters forecast model and developed a potential model for each restaurant we can shift our attention towards the ARIMA model.
+
+## 2. Proper application of the ARIMA model
+In this part of the report, we will follow the same procedure for all of the four stores to determine the best ARIMA model for forecasting daily demand of lettuce for the next two weeks. The best model will rely on the features and parameters of the ARIMA model that most closely represent the data; parameters that will be optimized in the following section. The first step will consist of checking the stationarity of the data and choose the adequate d and D of the ARIMA(p,d,q)(P,D,Q). Next we will analyse the ACF and partial ACF plots to pick possible values of the order of the seasonal and non-seasonal Moving Average (MA) and Autoregressive (AR) components p,q and P,Q. We will then use the information criteria tests for each of the four stores to check the optimal components values. Once we have the list of the models that stand out from the other, we will use them to fit the data and test their out of sample performance.
+
+### Store 4904
+For store 4904, the time series decomposition revealed the presence of a seasonal component as well as no significant linear trend assuming a stationary time series with a variance that appears constant. Moreover, there also exist many measures and tests to verify the correctness of our assumptions concerning a stationary process. We will carry out four main tests on the training set known as ACF, PP, KPSS and the Osborn-Chui-Smith-Birchenhall test that check the presence of a seasonal unit root. \
+
+```{r warning = FALSE}
+adf.test(ts_4904_train) # Augmented Dickey-Fuller Test 
+pp.test(ts_4904_train) # Phillips-Perron Unit Root Test
+kpss.test(ts_4904_train) # KPSS test
+nsdiffs(ts_4904_train) # Osborn-Chui-Smith-Birchenhall test
+```
+From the above tests, the ADF and PP test reveal a p-value lower than 0.01, meaning that we can reject the null hypothesis that the time series is non-stationary at 1% significance level as expected from above. For the KPSS test for level of stationarity, since the p-value is large and equal to 0.1, we fail to reject the null hypothesis that the data is stationary. Hence, the first three tests converge to the same observation: the time series is stationary. The Osborn-Chui-Smith-Birchenhall test however indicate that the seasonality is non-stationary (presence of a seasonal unit root) and that seasonal difference is required here.
+
+Hence, we need to carry the Osborn-Chui-Smith-Birchenhal test again but this time with a 1st order difference.
+```{r}
+ts_4904_train_dif1 <- diff(ts_4904_train, differences = 1, lag = 7) # 1st order difference
+nsdiffs(ts_4904_train_dif1) # Osborn-Chui-Smith-Birchenhall test
+```
+
+As we can see, the test now do not detect any seasonal unit root, meaning that the seasonal component is now stationary.
+We can conclude that the d = 0 and D = 1, initializing the model as ARIMA(p,0,q)(P,1,Q).
+
+The second step is to find the four other components using the ACF and PACF plots.
+```{r fig14, fig.height = 2.5, fig.width = 4}
+ggAcf(ts_4904_train_dif1, 35) # Autocorrelation function
+ggPacf(ts_4904_train_dif1, 35) # Partial Autocorrelation function
+```
+
+
+For the Autocorrelation function plot, we notice one significant spike at lag 7 that is beyond the 95% significance bound after which there are no more significant lag, so the order of q (the non-seasonal MA component) is likely to be smaller or equal to 7. Concerning the seasonal MA component Q however, there is no repetition of the peak after lag 7, so Q is likely equal to 0 as we do not see any seasonal spikes.
+
+For the Partial Autocorrelation function plot, there are two significant spikes, more specifically at lags 7 and 13 that are beyond the 95% significance bound. The order of p is likely to be smaller or equal to 13. Since there is no significant seasonal spikes and patterns, the P is likely to be equal to 0, we will need to check this assumption later on in the report.
+
+Having found a range of possible values for our seasonal and non-seasonal components, we can now use the auto.arima() built-in function in R with the Bayesian Information Criterion for model selection to determine the best potential ARIMA model.
+
+```{r}
+# activate the auto.arima() built in function
+auto.arima(ts_4904_train,d=0, D=1,max.p=13,max.q=7,trace=TRUE)
+```
+From the output we obtained from the auto.arima() function, the model ARIMA(1,0,1)(0,1,1)[7] with no drift was evaluated as the best for this model with AICc = 736.57 followed closely by ARIMA(1,0,2)(0,1,1)[7] with no drift and an AICc = 738.3206 and ARIMA(2,0,1)(0,1,1)[7] with no drift and AICc = 738.3387. An interesting model to evaluate would be ARIMA(1,0,7)(0,1,1) as deduced form the ACF and PACF plots. We will now evaluate the performance of those three models on the training set and test set to decide which one is the best for forecasting.
+
+```{r fig18, fig.height = 3.5, fig.width = 6}
+# initialize the models to test
+# model 1 as ARIMA(1,0,1)(0,1,1)
+model_4904_ARIMA_1 = Arima(ts_4904_train,order=c(1,0,1),
+                     seasonal=list(order=c(0,1,1),period=7))
+# model 2 as ARIMA(1,0,7)(0,1,1)
+model_4904_ARIMA_2 = Arima(ts_4904_train,order=c(1,0,7),
+                     seasonal=list(order=c(0,1,1),period=7))
+# model 3 as ARIMA(1,0,2)(0,1,1)
+model_4904_ARIMA_3 = Arima(ts_4904_train,order=c(1,0,2),
+                     seasonal=list(order=c(0,1,1),period=7))
+
+checkresiduals(model_4904_ARIMA_1)
+checkresiduals(model_4904_ARIMA_2)
+checkresiduals(model_4904_ARIMA_3)
+```
+Using the check residuals built-in function in R, we are able to test the three models presented above independently using one residual plot, the distribution of the residuals as well as the Ljung-Box test. Model 2 achieve the highest p-value (0.3279), hence accepting the null hypothesis that states that the forecast errors are independently distributed and that there is no evidence of any correlation between the forecast errors. Model 1 proposed by the auto.arima() function has a close p-value of 0.2834 followed by the third model with p-value of 0.1614 respectively, advantaging the first model to the third. The second and first model also present no significant peak in its ACF plot compared to 1 for the third model. The length of the peaks is also lower for the second model. Finally, the residual distribution of ARIMA(1,0,7)(0,1,1) is also better than the other two model putting it on top of the other for now. 
+
+However, we still need to evaluate the out of sample performance for each before deciding on the optimal ARIMA for store 4904.
+```{r}
+# initialize forecast of model 1
+forecast_4904_ARIMA_1 = forecast(model_4904_ARIMA_1, h=length(ts_4904)*0.2) 
+# initialize forecast of model 2
+forecast_4904_ARIMA_2 = forecast(model_4904_ARIMA_2, h=length(ts_4904)*0.2)
+# initialize forecast of model 3
+forecast_4904_ARIMA_3 = forecast(model_4904_ARIMA_3, h=length(ts_4904)*0.2)
+
+accuracy(forecast_4904_ARIMA_1,ts_4904_test) # accuracy metrics for predicted 1
+accuracy(forecast_4904_ARIMA_2,ts_4904_test) # accuracy metrics for predicted 2
+accuracy(forecast_4904_ARIMA_3,ts_4904_test) # accuracy metrics for predicted 3
+```
+
+Following the accuracy metrics obtained by comparing the test set and the predicted lettuce demand, while basing our conclusions on the RMSE, MAE and MAPE metrics, the second model was found the best on all the metrics. We can hence conclude following the performance of the models on the in and out-sample data points, ARIMA(1,0,7)(0,1,1) was found to be the optimal one.
+
+We will now use it to predict the daily lettuce demand for the next two following weeks.
+```{r fig289, fig.width = 8, fig.height = 3}
+# generate final forecast models and predict daily demand for next two weeks
+model_4904_ARIMA_final = Arima(ts_4904,order=c(1,0,7),
+                     seasonal=list(order=c(0,1,1),period=7))
+forecast_4904_ARIMA_final = forecast(model_4904_ARIMA_final,h=14)
+autoplot(forecast_4904_ARIMA_final)
+```
+
+### Store 12631
+
+For store 12631, the time series decomposition revealed the presence of a multiplicative seasonal component as well as no significant linear trend assuming a stationary time series with a variance that appears constant. Moreover, there also exist many measures and tests to verify the correctness of our assumptions concerning a stationary process. We will carry out four main tests on the training set known as ACF, PP, KPSS and the Osborn-Chui-Smith-Birchenhall test that check the presence of a seasonal unit root. \
+
+```{r warning = FALSE}
+adf.test(ts_12631_train) # Augmented Dickey-Fuller Test 
+pp.test(ts_12631_train) # Phillips-Perron Unit Root Test
+kpss.test(ts_12631_train) # KPSS test
+nsdiffs(ts_12631_train) # Osborn-Chui-Smith-Birchenhall test
+```
+From the above tests, the ADF and PP test reveal a p-value lower than 0.01, meaning that we can reject the null hypothesis that the time series is non-stationary at 1% significance level. For the KPSS test for level of stationarity, since the p-value is small and equal to 0.01, we can reject the null hypothesis that the data is stationary. Since the power of the KPSS test is more significant than the two other and we should reject the null hypothesis that the data is stationary. The Osborn-Chui-Smith-Birchenhall test also indicate that the seasonality is stationary (no presence of a seasonal unit root) and that seasonal difference is not required here.
+
+We need to carry the KPSS test again but this time with a 1st order difference.
+```{r warning = FALSE}
+ts_12631_train_dif1 <- diff(ts_12631_train, differences = 1, lag = 7) # 1st order difference
+kpss.test(ts_12631_train_dif1) # KPSS test
+```
+
+As we can see, the test now reveal a large p-value of 0.1 and we fail to reject the null hypothesis that the data is stationary, meaning that the trend component is now stationary.
+We can conclude that the d = 1 and D = 0, initializing the model as ARIMA(p,1,q)(P,0,Q).
+
+The second step is to find the four other components using the ACF and PACF plots.
+```{r fig987, fig.height = 2.5, fig.width = 4}
+ggAcf(ts_12631_train_dif1, 28) # Autocorrelation function
+ggPacf(ts_12631_train_dif1, 28) # Partial Autocorrelation function
+```
+
+
+For the Autocorrelation function plot, we notice one significant spike at lag 7 that is beyond the 95% significance bound after which there are no more significant lag, so the order of q (the non-seasonal MA component) is likely to be smaller or equal to 7. Concerning the seasonal MA component Q however, there is no repetition of the peak after lag 7, so Q is likely equal to 0 as we do not see any seasonal spikes.
+
+For the Partial Autocorrelation function plot, there are two significant spikes, more specifically at lags 7 and 14 that are beyond the 95% significance bound. The order of p is likely to be smaller or equal to 14. Since there is only two consecutive significant peak, there is not enough proof for us to deduce a seasonal spikes and patterns, the P is likely to be smaller of equal to 2, we will need to check this assumption later on in the report.
+
+Having found a range of possible values for our seasonal and non-seasonal components, we can now use the auto.arima() built-in function in R with the Bayesian Information Criterion for model selection to determine the best potential ARIMA model.
+
+```{r}
+# activate the auto.arima() built in function
+auto.arima(ts_12631_train,d=1, D=0,max.p=14,max.q=7,trace=TRUE)
+```
+From the output we obtained from the auto.arima() function, the model ARIMA(0,1,1)(0,0,2)[7] with no drift was evaluated as the best for this model with AICc = 848.55 followed closely by ARIMA(0,1,1)(0,0,1)[7] with no drift and an AICc = 848.828. An interesting model to evaluate would be ARIMA(0,1,7)(2,0,2) as deduced from the ACF and PACF plots. We will now evaluate the performance of those three models on the training set and test set to decide which one is the best for forecasting.
+
+```{r fig928, fig.height = 3.5, fig.width = 6}
+# initialize the models to test
+# model 1 as ARIMA(0,1,1)(2,0,0)
+model_12631_ARIMA_1 = Arima(ts_12631_train,order=c(0,1,1),
+                     seasonal=list(order=c(0,0,2),period=7))
+# model 2 as ARIMA(0,1,7)(2,0,0)
+model_12631_ARIMA_2 = Arima(ts_12631_train,order=c(0,1,7),
+                     seasonal=list(order=c(2,0,2),period=7))
+# model 3 as ARIMA(1,1,1)(2,0,0)
+model_12631_ARIMA_3 = Arima(ts_12631_train,order=c(0,1,1),
+                     seasonal=list(order=c(0,0,1),period=7))
+
+checkresiduals(model_12631_ARIMA_1)
+checkresiduals(model_12631_ARIMA_2)
+checkresiduals(model_12631_ARIMA_3)
+```
+Using the check residuals built-in function in R, we are able to test the three models presented above independently using one residual plot, the distribution of the residuals as well as the Ljung-Box test. Model 1 achieve the highest p-value (0.7718), hence accepting the null hypothesis that states that the forecast errors are independently distributed and hence there is no evidence of any correlation between the forecast errors. Model 2 proposed intuitively from the plots has the lowest p-value of 0.3788 just behind the third model with p-value of 0.4469. All three models also present no significant peak in their ACF plot, with model 2 having the shortest peaks. Finally, the residual distribution of the all three models are approximately the same. 
+
+However, we still need to evaluate the out of sample performance for each before deciding on the optimal ARIMA for store 12631
+```{r}
+# initialize forecast of model 1
+forecast_12631_ARIMA_1 = forecast(model_12631_ARIMA_1, h=round(length(ts_12631)*0.2)-1) 
+# initialize forecast of model 2
+forecast_12631_ARIMA_2 = forecast(model_12631_ARIMA_2, h=round(length(ts_12631)*0.2)-1)
+# initialize forecast of model 3
+forecast_12631_ARIMA_3 = forecast(model_12631_ARIMA_3, h=round(length(ts_12631)*0.2)-1)
+
+accuracy(forecast_12631_ARIMA_1,ts_12631_test) # accuracy metrics for predicted 1
+accuracy(forecast_12631_ARIMA_2,ts_12631_test) # accuracy metrics for predicted 2
+accuracy(forecast_12631_ARIMA_3,ts_12631_test) # accuracy metrics for predicted 3
+```
+
+Following the accuracy metrics obtained by comparing the test set and the predicted lettuce demand, while basing our conclusions on the RMSE, MAE and MAPE metrics, the second model was found the best on all the metrics. We can hence conclude following the performance of the models on the in and out-sample data points, ARIMA(0,1,7)(2,0,2) was found to be the optimal one.
+
+We will now use it to predict the daily lettuce demand for the next two following weeks.
+```{r fig89, fig.width = 8, fig.height = 3}
+# generate final forecast models and predict daily demand for next two weeks
+model_12631_ARIMA_final = Arima(ts_12631,order=c(0,1,7),
+                     seasonal=list(order=c(2,0,2),period=7))
+forecast_12631_ARIMA_final = forecast(model_12631_ARIMA_final,h=14)
+autoplot(forecast_12631_ARIMA_final)
+```
+### Store 20974
+
+For store 20974, the time series decomposition revealed the presence of an additive seasonal component as well as no significant linear trend assuming a stationary time series with a variance that appears constant. Moreover, there also exist many measures and tests to verify the correctness of our assumptions concerning a stationary process. We will carry out four main tests on the training set known as ACF, PP, KPSS and the Osborn-Chui-Smith-Birchenhall test that check the presence of a seasonal unit root. \
+
+```{r warning = FALSE}
+adf.test(ts_20974_train) # Augmented Dickey-Fuller Test 
+pp.test(ts_20974_train) # Phillips-Perron Unit Root Test
+kpss.test(ts_20974_train) # KPSS test
+nsdiffs(ts_20974_train) # Osborn-Chui-Smith-Birchenhall test
+```
+From the above tests, the ADF test reveal a p-value of 0.05 and the PP test a p-value of 0.01, meaning that we can reject the null hypothesis that the time series is non-stationary at 10% and 1% significance level respectively. For the KPSS test for level of stationarity, since the p-value is large and equal to 0.1, we fail to reject the null hypothesis that the data is stationary. The Osborn-Chui-Smith-Birchenhall test also indicate that the seasonality is stationary (no presence of a seasonal unit root) and that seasonal difference is not required here.
+
+We can conclude that the d = 0 and D = 0, initializing the model as ARIMA(p,0,q)(P,0,Q).
+
+The second step is to find the four other components using the ACF and PACF plots.
+```{r fig9947, fig.height = 2.5, fig.width = 4}
+ggAcf(ts_20974_train, 28) # Autocorrelation function
+ggPacf(ts_20974_train, 28) # Partial Autocorrelation function
+```
+
+
+For the Autocorrelation function plot, we notice one significant spike at lag 1 and lag 7 that is beyond the 95% significance bound after which there are no more significant lag, so the order of q (the non-seasonal MA component) is likely to be smaller or equal to 7. Concerning the seasonal MA component Q however, there is may be some repetition of the peaks in early lags, so Q is likely smaller to 2, we will need to check this assumption later on in the report.
+
+For the Partial Autocorrelation function plot, there is one significant spikes, more specifically at lag 1 that is beyond the 95% significance bound. The order of p is likely to be smaller or equal to 1. Since there is only one significant peak, there is not enough proof for us to deduce a seasonal spikes and patterns, the P is likely to be equal to 0, we will need to check this assumption later on in the report.
+
+Having found a range of possible values for our seasonal and non-seasonal components, we can now use the auto.arima() built-in function in R with the Bayesian Information Criterion for model selection to determine the best potential ARIMA model.
+
+```{r}
+# activate the auto.arima() built in function
+auto.arima(ts_20974_train,d=0, D=0,max.p=1,max.q=7,trace=TRUE)
+```
+From the output we obtained from the auto.arima() function, the model ARIMA(1,0,0)(1,0,0)[7] was evaluated as the best for this model with AICc = 751.1 followed closely by ARIMA(0,0,1)(1,0,0)[7] and an AICc = 751.8502 Another interesting model to evaluate would be ARIMA(1,0,7)(1,0,0) as deduced from the ACF and PACF plots. We will now evaluate the performance of those three models on the training set and test set to decide which one is the best for forecasting.
+
+```{r fig7738, fig.height = 3.5, fig.width = 6}
+# initialize the models to test
+# model 1 as ARIMA(1,0,0)(1,0,0)
+model_20974_ARIMA_1 = Arima(ts_20974_train,order=c(1,0,0),
+                     seasonal=list(order=c(1,0,0),period=7))
+# model 2 as ARIMA(1,0,7)(1,0,0)
+model_20974_ARIMA_2 = Arima(ts_20974_train,order=c(1,0,7),
+                     seasonal=list(order=c(1,0,0),period=7))
+# model 3 as ARIMA(0,0,1)(1,0,0)
+model_20974_ARIMA_3 = Arima(ts_20974_train,order=c(0,0,1),
+                     seasonal=list(order=c(1,0,0),period=7))
+
+checkresiduals(model_20974_ARIMA_1)
+checkresiduals(model_20974_ARIMA_2)
+checkresiduals(model_20974_ARIMA_3)
+```
+Using the check residuals built-in function in R, we are able to test the three models presented above independently using one residual plot, the distribution of the residuals as well as the Ljung-Box test. Model 1 achieve the highest p-value (0.7508), hence accepting the null hypothesis that states that the forecast errors are independently distributed and hence there is no evidence of any correlation between the forecast errors. Model 2 proposed intuitively from the plots has the lowest p-value of 0.4644 behind the third model with p-value of 0.7122. All three models also present no significant peak in their ACF plot. Finally, the residual distribution of the all three models are approximately the same. 
+
+Moreover, we still need to evaluate the out of sample performance for each before deciding on the optimal ARIMA for store 20974.
+```{r}
+# initialize forecast of model 1
+forecast_20974_ARIMA_1 = forecast(model_20974_ARIMA_1, h=round(length(ts_20974)*0.2)-1) 
+# initialize forecast of model 2
+forecast_20974_ARIMA_2 = forecast(model_20974_ARIMA_2, h=round(length(ts_20974)*0.2)-1)
+# initialize forecast of model 3
+forecast_20974_ARIMA_3 = forecast(model_20974_ARIMA_3, h=round(length(ts_20974)*0.2)-1)
+
+accuracy(forecast_20974_ARIMA_1,ts_20974_test) # accuracy metrics for predicted 1
+accuracy(forecast_20974_ARIMA_2,ts_20974_test) # accuracy metrics for predicted 2
+accuracy(forecast_20974_ARIMA_3,ts_20974_test) # accuracy metrics for predicted 3
+```
+
+Following the accuracy metrics obtained by comparing the test set and the predicted lettuce demand, while basing our conclusions on the RMSE, MAE and MAPE metrics, the second model was found the best on all the metrics. We can hence conclude following the performance of the models on the in and out-sample data points, ARIMA(1,0,7)(1,0,0) was found to be the optimal one.
+
+We will now use it to predict the daily lettuce demand for the next two following weeks.
+```{r fig9703, fig.width = 8, fig.height = 3}
+# generate final forecast models and predict daily demand for next two weeks
+model_20974_ARIMA_final = Arima(ts_20974,order=c(1,0,7),
+                     seasonal=list(order=c(1,0,0),period=7))
+forecast_20974_ARIMA_final = forecast(model_20974_ARIMA_final,h=14)
+autoplot(forecast_20974_ARIMA_final)
+```
+
+### Store 46673
+
+For store 46673, the time series decomposition revealed the presence of an additive seasonal component as well as no significant linear trend assuming a stationary time series with a variance that appears constant. Moreover, there also exist many measures and tests to verify the correctness of our assumptions concerning a stationary process. We will carry out four main tests on the training set known as ACF, PP, KPSS and the Osborn-Chui-Smith-Birchenhall test that check the presence of a seasonal unit root. \
+
+```{r warning = FALSE}
+adf.test(ts_46673_train) # Augmented Dickey-Fuller Test 
+pp.test(ts_46673_train) # Phillips-Perron Unit Root Test
+kpss.test(ts_46673_train) # KPSS test
+nsdiffs(ts_46673_train) # Osborn-Chui-Smith-Birchenhall test
+```
+From the above tests, the ADF test reveal a p-value of 0.01 and the PP test a p-value of 0.01, meaning that we can reject the null hypothesis that the time series is non-stationary at 1% significance level respectively. For the KPSS test for level of stationarity, since the p-value is large and equal to 0.1, we fail to reject the null hypothesis that the data is stationary. The Osborn-Chui-Smith-Birchenhall test indicates that the seasonality is non-stationary ( presence of a seasonal unit root) and that seasonal difference is required here.
+
+We will then apply a 1st order difference and test the time series again
+```{r}
+ts_46673_train_dif1 <- diff(ts_46673_train, differences = 1, lag = 7) # 1st order difference
+nsdiffs(ts_46673_train_dif1) # Osborn-Chui-Smith-Birchenhall test
+```
+We can conclude that the d = 0 and D = 1, initializing the model as ARIMA(p,0,q)(P,1,Q).
+
+The second step is to find the four other components using the ACF and PACF plots.
+```{r fig837, fig.height = 2.5, fig.width = 4}
+ggAcf(ts_46673_train_dif1, 28) # Autocorrelation function
+ggPacf(ts_46673_train_dif1, 28) # Partial Autocorrelation function
+```
+
+
+For the Autocorrelation function plot, we notice one significant spike at lag 7 and lag 11 that is beyond the 95% significance bound after which there are no more significant lag, so the order of q (the non-seasonal MA component) is likely to be smaller or equal to 11. Concerning the seasonal MA component Q however, there is no significant repetition in the plot so Q is likely to be equal to 0, we will need to check this assumption later on in the report.
+
+For the Partial Autocorrelation function plot, there is two significant spikes, more specifically at lag 7 and 15 that is beyond the 95% significance bound. The order of p is likely to be smaller or equal to 15 Since there is only one significant peak, there is not enough proof for us to deduce a seasonal spikes and patterns, the P is likely to be equal to 0, we will need to check this assumption later on in the report.
+
+Having found a range of possible values for our seasonal and non-seasonal components, we can now use the auto.arima() built-in function in R with the Bayesian Information Criterion for model selection to determine the best potential ARIMA model.
+
+```{r}
+# activate the auto.arima() built in function
+auto.arima(ts_46673_train,d=0, D=1,max.p=11,max.q=15,trace=TRUE)
+```
+From the output we obtained from the auto.arima() function, the model ARIMA(0,0,0)(0,1,1)[7] was evaluated as the best for this model with AICc = 721.7 followed closely by ARIMA(1,0,0)(0,1,1)[7] and an AICc = 721.7639 Another interesting model to evaluate would be ARIMA(0,0,7)(0,1,1) as deduced from the ACF and PACF plots. We will now evaluate the performance of those three models on the training set and test set to decide which one is the best for forecasting.
+
+```{r fig12345, fig.height = 3.5, fig.width = 6}
+# initialize the models to test
+# model 1 as ARIMA(0,0,0)(0,1,1)
+model_46673_ARIMA_1 = Arima(ts_46673_train,order=c(0,0,0),
+                     seasonal=list(order=c(0,1,1),period=7))
+# model 2 as ARIMA(0,0,7)(0,1,1)
+model_46673_ARIMA_2 = Arima(ts_46673_train,order=c(0,0,7),
+                     seasonal=list(order=c(0,1,1),period=7))
+# model 3 as ARIMA(1,0,0)(0,1,1)
+model_46673_ARIMA_3 = Arima(ts_46673_train,order=c(1,0,0),
+                     seasonal=list(order=c(0,1,1),period=7))
+
+checkresiduals(model_46673_ARIMA_1)
+checkresiduals(model_46673_ARIMA_2)
+checkresiduals(model_46673_ARIMA_3)
+```
+Using the check residuals built-in function in R, we are able to test the three models presented above independently using one residual plot, the distribution of the residuals as well as the Ljung-Box test. Model 1 achieve the lowest p-value (0.05831), hence rejecting the null hypothesis that states that the forecast errors are independently distributed and hence there is evidence of any correlation between the forecast errors at 5% significance level. Model 2 proposed intuitively from the plots has the highest p-value of 0.2807 followed the third model with p-value of 0.2393. Model 1 and 2 reveal two significant peaks in their ACF plot where one them can be considered as random but not the second peak. The presence of these peaks infer any correlation between the forecast errors.
+
+Moreover, we still need to evaluate the out of sample performance for each before deciding on the optimal ARIMA for store 46673
+```{r}
+# initialize forecast of model 1
+forecast_46673_ARIMA_1 = forecast(model_46673_ARIMA_1, h=round(length(ts_46673)*0.2)-1) 
+# initialize forecast of model 2
+forecast_46673_ARIMA_2 = forecast(model_46673_ARIMA_2, h=round(length(ts_46673)*0.2)-1)
+# initialize forecast of model 3
+forecast_46673_ARIMA_3 = forecast(model_46673_ARIMA_3, h=round(length(ts_46673)*0.2)-1)
+
+accuracy(forecast_46673_ARIMA_1,ts_46673_test) # accuracy metrics for predicted 1
+accuracy(forecast_46673_ARIMA_2,ts_46673_test) # accuracy metrics for predicted 2
+accuracy(forecast_46673_ARIMA_3,ts_46673_test) # accuracy metrics for predicted 3
+```
+
+Following the accuracy metrics obtained by comparing the test set and the predicted lettuce demand, while basing our conclusions on the RMSE, MAE and MAPE metrics, the second model was found the best on all the metrics. We can hence conclude following the performance of the models on the in and out-sample data points, ARIMA(0,0,7)(0,1,1) was found to be the optimal one.
+
+We will now use it to predict the daily lettuce demand for the next two following weeks.
+```{r fig1234, fig.width = 8, fig.height = 3}
+# generate final forecast models and predict daily demand for next two weeks
+model_46673_ARIMA_final = Arima(ts_46673,order=c(0,0,7),
+                     seasonal=list(order=c(0,1,1),period=7))
+forecast_46673_ARIMA_final = forecast(model_46673_ARIMA_final,h=14)
+autoplot(forecast_46673_ARIMA_final)
+```
+
+## 3. Performance comparison between Holt-Winters and ARIMA (25%)
+After walking through the different steps and procedure to build a forecast model that will predict the daily demand of lettuce for four different branch, we now arrive to the third and final part of this report where we evaluate the best model for each store. In fact, our evaluation and analysis will be based on the comparison of the best Holt-Winters and ARIMA models that were developed in the previous parts. We will compare the best two models that we concluded to be the best in both methodology and deduce the final optimal model to forecast the daily demand of lettuce for the next two weeks.
+
+### Store 4904
+
+The first store up for analysis is store 4904. The final potential models with the best in-sample and out-of-sample performance to predict the lettuce demand are the the ETS(A,N,A) exponential smoothing and the ARIMA(1,0,7)(0,1,1)[7]. The performance of both models is determined by their RMSE:
+
+ETS(A,N,A) model in-sample performance: 41.26204
+ETS(A,N,A) model out-sample performance: 55.95950
+
+ARIMA(1,0,7)(0,1,1) model in-sample performance: 37.70413
+ARIMA(1,0,7)(0,1,1) model out-sample performance: 55.30547
+
+As we can see both models have a very similar performance on our data set but the ARIMA model seems to fit the data better and have a more accurate prediction of the daily lettuce demand for the test set. Hence, the ARIMA(1,0,7)(0,1,1) model will be selected as the final forecast model for restaurant 4904. The final step here is to train our selected model with the entire data set and predict the daily lettuce demand for the next two weeks.
+
+```{r fig123432, fig.width = 8, fig.height = 3}
+forecast_4904_final = forecast(model_4904_ARIMA_final,h=14)
+autoplot(forecast_4904_final)
+forecast_4904_final
+```
+
+### Store 12631
+
+The next store up for analysis is store 12631 The final potential models with the best in-sample and out-of-sample performance to predict the lettuce demand are the the ETS(M,A,M) exponential smoothing and the ARIMA(0,1,7)(2,0,2)[7]. The performance of both models is determined by their RMSE:
+
+ETS(M,A,M) model in-sample performance: 34.48553
+ETS(M,A,M) model out-sample performance: 45.76627
+
+ARIMA(1,0,7)(0,1,1) model in-sample performance: 36.56055
+ARIMA(1,0,7)(0,1,1) model out-sample performance: 46.03044
+
+As we can see both models have a very similar performance on our data set but the ETS model seems to fit the data better and have a more accurate prediction of the daily lettuce demand for the test set. Hence, the ETS(M,A,M) model will be selected as the final forecast model for restaurant 12631. The final step here is to train our selected model with the entire data set and predict the daily lettuce demand for the next two weeks.
+
+```{r fig12340932, fig.width = 8, fig.height = 3}
+forecast_12631_final = forecast(model_12631_ets_final,h=14)
+autoplot(forecast_12631_final)
+forecast_12631_final
+```
+
+### Store 20974
+
+The next store up for analysis is store 20974. The final potential models with the best in-sample and out-of-sample performance to predict the lettuce demand are the the ETS(A,N,A) exponential smoothing and the ARIMA(1,0,7)(1,0,0)[7]. The performance of both models is determined by their RMSE:
+
+ETS(A,N,A) model in-sample performance: 41.53243
+ETS(A,N,A) model out-sample performance: 47.64217
+
+ARIMA(1,0,7)(1,0,0) model in-sample performance: 44.55232
+ARIMA(1,0,7)(1,0,0) model out-sample performance: 43.92209
+
+For this store, the RMSE is trickier than the previous two. In fact, despite the fitted data having the lowest RMSE of 41.53, the performance of the ETS model on the unseen data decrease significantly with the RMSE increasing to 47.64! This could mean that the model is more over fitting the data than being actually able to predict the general trend behind the lettuce the demand. The ARIMA model however has a higher RMSE for the in sample performance of 44.55 but it decrease to 43.92 on the test set. Meaning that the ARIMA model is doing a better job at learning the general trend of the data as well as out of sample data. Hence, the ARIMA(1,0,7)(1,0,0) model will be selected as the final forecast model for restaurant 20974. The final step here is to train our selected model with the entire data set and predict the daily lettuce demand for the next two weeks.
+
+```{r fig12314632, fig.width = 8, fig.height = 3}
+forecast_12631_final = forecast(model_20974_ARIMA_final,h=14)
+autoplot(forecast_12631_final)
+forecast_12631_final
+```
+
+### Store 46673
+
+Last but not least, the last store to analyse is store 46673 The final potential models with the best in-sample and out-of-sample performance to predict the lettuce demand are the the ETS(A,N,A) exponential smoothing and the ARIMA(0,0,7)(0,1,1)[7]. The performance of both models is determined by their RMSE:
+
+ETS(A,N,A) model in-sample performance: 23.26748
+ETS(A,N,A) model out-sample performance: 36.67258
+
+ARIMA(1,0,7)(1,0,0) model in-sample performance: 23.37107
+ARIMA(1,0,7)(1,0,0) model out-sample performance: 44.66946
+
+We can clearly see that the ETS model significantly stands out on its performance on the test set. In fact, both the ARIMA and ETS model are doing a great job in fitting the data with a similar RMSE of 23.3 approximately. However, the ETS seems to be have a significantly better performance on the out of sample data set with an RMSE of 36.67 compared to 44.66 for the ARIMA model. Thus, the ETS(A,N,A) model will be selected as the final forecast model for restaurant 46673. The final step here is to train our selected model with the entire data set and predict the daily lettuce demand for the next two weeks.
+
+```{r fig1234322, fig.width = 8, fig.height = 3}
+forecast_46673_final = forecast(model_46673_ets_final,h=14)
+autoplot(forecast_46673_final)
+forecast_46673_final
+```
+
+
+
+
+
+
+
+
+
+
+
+
